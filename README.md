@@ -1386,3 +1386,578 @@ VPS 上 Docker 部署 LinuxServer.io Obsidian
 + Self-hosted LiveSync（同步到本地设备）
 + 浏览器 → 随时随地打开使用
 ```
+
+---
+
+## 七、Obsidian + AI Agent Skill 深度集成
+
+> 核心目标：让 AI Agent（Claude Code / Codex CLI / 自定义 Skill）能够读取、搜索、引用你的 Obsidian 知识库，在自动化测试设计、代码审查、问题排查等场景中，给出基于真实经验积累的精准建议。
+
+### 7.1 整体架构
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                   AI Agent (Claude Code)                       │
+│  ┌──────────┐  ┌──────────┐  ┌───────────────┐               │
+│  │ Test     │  │ Code     │  │ Bug Analysis  │  更多Skills   │
+│  │ Design   │  │ Review   │  │ Skill         │               │
+│  │ Skill    │  │ Skill    │  │               │               │
+│  └────┬─────┘  └────┬─────┘  └───────┬───────┘               │
+│       │              │               │                         │
+│       └──────────────┼───────────────┘                         │
+│                      │                                         │
+│              ┌───────▼────────┐                                │
+│              │  知识库检索层   │                                │
+│              │ grep/Dataview  │                                │
+│              │ Smart Connect  │                                │
+│              │ MCP REST API   │                                │
+│              └───────┬────────┘                                │
+└──────────────────────┼────────────────────────────────────────┘
+                       │ 读取 / 搜索
+┌──────────────────────▼────────────────────────────────────────┐
+│                   Obsidian Vault（本地知识库）                   │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐      │
+│  │ 测试经验库 │  │ 测试因子库 │  │ 业务规则库 │  │ 缺陷模式库 │      │
+│  │experiences│  │ factors  │  │ business │  │ bug-patterns│    │
+│  └──────────┘  └──────────┘  └──────────┘  └──────────┘      │
+└──────────────────────────────────────────────────────────────┘
+```
+
+**核心原理：** Obsidian 笔记就是本地 Markdown 文件。AI Agent 运行在你的电脑上，可以直接通过文件系统读取 `.md` 文件，也可以借助 grep/ripgrep 搜索、Dataview 结构化查询、Smart Connections 语义搜索等方式，在对话中引用知识库内容。
+
+### 7.2 集成方案对比（三种方案按需选择）
+
+| 方案 | 原理 | 复杂度 | 搜索方式 | 适用场景 |
+|------|------|--------|---------|---------|
+| **A. 文件系统直读** | Agent 用 Read/Grep 直接读 .md 文件 | 极低 | 关键词匹配 (ripgrep) | 入门、小仓库 |
+| **B. MCP + REST API** | Obsidian 插件暴露 HTTP API + 语义搜索 | 中 | 关键词 + 语义搜索 | 大仓库、需智能检索 |
+| **C. obsidian-skills** | kepano 开源 Skills，教 AI 正确读写 Obsidian 格式 | 低 | 配合 A/B 使用 | 语法正确性、Canvas/Bases |
+
+**推荐策略：方案A（入门必选）+ 方案C（强烈推荐）→ 方案B（仓库超过500篇笔记时再上）**
+
+### 7.3 知识库结构设计（测试场景）
+
+#### 7.3.1 推荐目录结构
+
+```
+Testing-Knowledge-Vault/
+├── 00-Inbox/                    # 待整理的经验碎片
+├── 01-Experiences/              # 测试经验库（核心）
+│   ├── 功能测试/
+│   │   ├── 登录模块测试经验.md
+│   │   ├── 支付流程测试经验.md
+│   │   └── 表单验证测试经验.md
+│   ├── 性能测试/
+│   ├── 安全测试/
+│   └── 兼容性测试/
+├── 02-Factors/                  # 测试因子库（核心）
+│   ├── 输入因子/                 # 等价类、边界值
+│   ├── 环境因子/                 # 系统、网络、硬件
+│   ├── 状态因子/                 # 状态机、生命周期
+│   └── 组合因子/                 # 正交/因果组合
+├── 03-Business-Rules/           # 业务规则库
+├── 04-Bug-Patterns/             # 缺陷模式库
+├── 05-Test-Methods/             # 测试方法论
+├── 06-Cases/                    # 经典测试用例库
+├── 07-Templates/                # 模板文件
+└── 08-MOCs/                     # 索引/地图（Map of Content）
+```
+
+#### 7.3.2 Frontmatter 元数据规范
+
+Agent 搜索知识库主要依赖**文件名**和 **Frontmatter 属性**。规范的元数据是精准检索的关键。
+
+**测试经验笔记 Frontmatter：**
+
+```yaml
+---
+type: testing-experience
+module: "订单退款"         # 被测模块
+submodule: "退款审批流"    # 子模块
+test-type: "功能测试"      # 功能/性能/安全/兼容性
+test-method: "状态迁移"    # 等价类/边界值/因果图/正交
+priority: "P0"            # P0/P1/P2/P3
+severity: ""              # 缺陷严重度
+tags: [退款, 状态机, 幂等]
+source: "电商平台v3.2"     # 来源项目
+date: "2026-05-23"
+status: "reviewed"        # draft/reviewed/published
+related-factors: [验证码因子, 金额计算因子]
+related-bugs: [BUG-4201, BUG-4205]
+---
+```
+
+**因子条目 Frontmatter：**
+
+```yaml
+---
+type: test-factor
+category: "输入"           # 输入/环境/状态/组合
+subcategory: "字符串"      # 字符串/数值/日期/网络...
+factor-name: "用户名输入"
+test-methods: [等价类划分, 边界值分析]
+related-experiences: [登录模块测试经验]
+related-bugs: [BUG-3088]
+tags: [输入校验, SQL注入, Unicode]
+risk-level: "high"
+---
+```
+
+#### 7.3.3 模板文件
+
+**测试经验模板** (`07-Templates/测试经验模板.md`)：
+
+```markdown
+---
+type: testing-experience
+module: ""
+submodule: ""
+test-type: ""
+test-method: ""
+priority: ""
+severity: ""
+tags: []
+source: ""
+date: ""
+status: draft
+related-factors: []
+related-bugs: []
+---
+
+# {{title}}
+
+## 场景描述
+> 被测功能或场景的简要描述
+
+## 前置条件
+-
+
+## 测试要点
+### 关键检查点
+- [ ]
+
+### 易遗漏边界
+- [ ]
+
+### 异常路径
+- [ ]
+
+## 实际踩过的坑
+### 问题描述
+### 根因
+### 解决方案
+### 预防措施
+
+## 关联因子
+## 关联缺陷模式
+```
+
+**因子条目模板** (`07-Templates/因子条目模板.md`)：
+
+```markdown
+---
+type: test-factor
+category: ""
+subcategory: ""
+factor-name: ""
+test-methods: []
+risk-level: "medium"
+tags: []
+---
+
+# {{title}}
+
+## 因子定义
+-
+
+## 覆盖维度
+### 有效等价类
+| 类别 | 代表值 | 说明 |
+|------|--------|------|
+|      |        |      |
+
+### 无效等价类
+| 类别 | 代表值 | 预期结果 |
+|------|--------|----------|
+|      |        |          |
+
+### 边界值
+| 边界 | 测试值 | 预期结果 |
+|------|--------|----------|
+| 上点 |        |          |
+| 离点 |        |          |
+
+## 组合策略
+## 真实缺陷案例
+```
+
+### 7.4 方案A：文件系统直读（入门必选）
+
+**原理：** Agent 原生就支持 Read/Grep 工具，直接读取 Obsidian vault 中的 `.md` 文件。零额外配置。
+
+#### Step 1：在项目 CLAUDE.md 中声明知识库路径
+
+```markdown
+# CLAUDE.md（项目根目录）
+
+## Obsidian Testing Knowledge Base
+
+测试知识库路径：`~/Documents/Obsidian/Testing-Knowledge-Vault/`
+
+关键目录：
+- 01-Experiences/  测试经验库（按模块记录历史经验、踩过的坑）
+- 02-Factors/      测试因子库（等价类、边界值、正交因子）
+- 03-Business-Rules/ 业务规则库
+- 04-Bug-Patterns/ 缺陷模式库
+- 08-MOCs/         总索引页
+
+进行测试设计、用例编写、Bug分析时，请先搜索该知识库：
+1. 用 grep 搜索关键模块名、方法名
+2. 读取匹配的笔记，提取测试要点、踩坑经验、因子组合
+3. 结合知识库内容给出建议，并标注信息来源
+```
+
+#### Step 2：Agent 自动搜索流程
+
+当你在 Claude Code 中要求设计测试用例时，Agent 会自动执行：
+
+```
+用户：为「订单退款」功能设计测试用例
+
+Agent 自动执行（基于 CLAUDE.md 中的指示）：
+1. grep -ril "退款|refund" ~/Documents/Obsidian/Testing-Knowledge-Vault/
+2. 命中：
+   - 01-Experiences/支付流程测试经验.md
+   - 03-Business-Rules/电商业务规则.md
+   - 04-Bug-Patterns/数据一致性问题模式.md
+3. 读取这些笔记，提取关键信息
+4. 融合知识库内容，给出标记了来源的测试建议
+```
+
+**优点：** 零配置、直接可用、任意 Agent 都支持
+**缺点：** 大 vault 时搜索慢，依赖关键词精确匹配
+
+---
+
+### 7.5 方案C：kepano/obsidian-skills（强烈推荐）
+
+> GitHub: https://github.com/kepano/obsidian-skills
+
+Obsidian CEO kepano 开源的 Agent Skills，教会 AI 如何正确读写 Obsidian 专属格式。
+
+**提供的三项核心能力：**
+
+| Skill | 功能 |
+|-------|------|
+| `obsidian-markdown` | 让 AI 使用 `[[wikilinks]]`、Callout、Frontmatter 等 Obsidian 特有语法 |
+| `obsidian-bases` | 让 AI 创建和编辑 `.base` 文件（Obsidian 数据库视图） |
+| `json-canvas` | 让 AI 理解和生成 `.canvas` 无限画布文件 |
+
+**安装（推荐全局安装）：**
+
+```bash
+mkdir -p ~/.claude/skills
+git clone https://github.com/kepano/obsidian-skills.git /tmp/obsidian-skills
+cp -r /tmp/obsidian-skills/skills/* ~/.claude/skills/
+rm -rf /tmp/obsidian-skills
+```
+
+或在 Claude Code 中：`/plugin install obsidian@obsidian-skills`
+
+验证：运行 `/skills` 应看到三个 obsidian-* skill。
+
+---
+
+### 7.6 实战：创建「Test Design Skill」
+
+这是最关键的部分——让 Agent 在做测试设计时自动搜索知识库并引用。
+
+#### 7.6.1 SKILL.md 完整内容
+
+创建 `~/.claude/skills/test-design/SKILL.md`：
+
+```markdown
+---
+name: test-design
+description: >
+  软件测试设计助手。结合 Obsidian 测试知识库（经验库、因子库、缺陷模式库）
+  生成全面的测试建议和测试用例。Use when user asks about 测试设计, 测试用例,
+  测试策略, 用例评审, test design, test cases, test strategy.
+allowed-tools:
+  - Read
+  - Grep
+  - Glob
+  - Bash(grep:*,rg:*)
+---
+
+# Test Design Skill
+
+你是资深软件测试架构师。你的任务是结合 **Obsidian 测试知识库** 给出全面精准的测试设计建议。
+
+## 知识库路径
+
+默认路径：`~/Documents/Obsidian/Testing-Knowledge-Vault/`
+如果项目 CLAUDE.md 中指定了其他路径，以 CLAUDE.md 为准。
+
+## 工作流程
+
+### Phase 1：信息收集
+1. 明确被测对象（模块、功能、接口）
+2. 提取搜索关键词（中文 + 英文）
+3. 识别涉及的测试类型
+
+### Phase 2：知识库搜索（必须执行，不可跳过）
+
+```
+搜索1 → 经验库（历史踩坑、检查点）
+  rg -il "关键词" ~/path/01-Experiences/
+
+搜索2 → 因子库（等价类、边界值、正交因子）
+  rg -il "关键词" ~/path/02-Factors/
+
+搜索3 → 业务规则
+  rg -il "关键词" ~/path/03-Business-Rules/
+
+搜索4 → 缺陷模式
+  rg -il "关键词" ~/path/04-Bug-Patterns/
+
+搜索5 → 经典用例
+  rg -il "关键词" ~/path/06-Cases/
+```
+
+**策略：**
+- 先用精确关键词，无结果则扩展搜索范围
+- 至少选 2-3 篇最相关笔记深入阅读
+- 如果知识库路径不存在或搜索无结果，告知用户并降级使用通用方法论
+
+### Phase 3：知识提取
+从搜索到的笔记中提取：
+- 「关键检查点」「易遗漏边界」「异常路径」（经验库）
+- 「等价类」「边界值」「组合策略」（因子库）
+- 「业务约束」（业务规则库）
+- 「典型缺陷」（缺陷模式库）
+
+### Phase 4：生成输出
+
+## 输出格式
+
+### 1. 知识库命中情况
+| 知识库 | 命中笔记 | 关联度 |
+|--------|---------|--------|
+| 经验库 | [[笔记名]] | 高/中/低 |
+
+### 2. 测试策略建议
+- 测试重点（基于经验库历史踩坑）
+- 测试优先级
+- 推荐测试方法
+
+### 3. 测试因子分析
+| 因子 | 来源 | 等价类 | 边界值 | 异常值 |
+|------|------|--------|--------|--------|
+
+### 4. 测试用例
+| 用例ID | 场景 | 前置条件 | 步骤 | 预期结果 | 知识来源 |
+|--------|------|---------|------|---------|---------|
+
+### 5. 易遗漏检查点 ⚠️
+- 基于经验库「实际踩过的坑」章节
+
+### 6. 风险评估
+- 基于缺陷模式库的关联分析
+
+## 质量要求
+- 每个基于知识库的建议必须标注来源笔记名
+- 明确区分「来自知识库的经验」和「来自通用方法论」
+- 知识库没有的信息不编造，使用通用方法论补充并注明
+- 输出格式便于后续导入 Obsidian
+```
+
+#### 7.6.2 安装 Skill
+
+```bash
+mkdir -p ~/.claude/skills/test-design
+# 将上面的 SKILL.md 内容写入
+cat > ~/.claude/skills/test-design/SKILL.md <<'SKILLEOF'
+# ... 上面的完整 SKILL.md 内容 ...
+SKILLEOF
+```
+
+#### 7.6.3 使用演示
+
+**场景：为登录功能设计测试用例**
+
+```
+用户：/test-design 为手机号验证码登录功能设计测试用例
+
+Agent 执行：
+Phase 2:
+  → rg -il "登录|login|验证码|SMS" .../01-Experiences/
+  命中：登录模块测试经验.md, 短信服务测试经验.md
+  → rg -il "手机号|验证码" .../02-Factors/
+  命中：验证码因子.md
+  → rg -il "并发|超时" .../04-Bug-Patterns/
+  命中：并发竞态模式.md, 接口超时处理模式.md
+
+输出摘要：
+  知识库命中：
+  | 经验库 | 登录模块测试经验.md | 高 |
+  | 经验库 | 短信服务测试经验.md | 高 |
+  | 因子库 | 验证码因子.md | 高 |
+  | 缺陷库 | 并发竞态模式.md | 中 |
+
+  易遗漏检查点 ⚠️：
+  - 图形验证码绕过（来源：登录模块测试经验.md 实际踩过的坑 #3）
+  - 多设备同时登录 token 处理（来源：并发竞态模式.md）
+  - 验证码有效期边界 59s/60s/61s（来源：验证码因子.md 边界值表）
+```
+
+### 7.7 进阶：辅助 Skills
+
+#### 7.7.1 test-capture（沉淀经验 Skill）
+
+```markdown
+---
+name: test-capture
+description: >
+  将测试中发现的 Bug、经验快速沉淀到 Obsidian 知识库。
+  Use when user says 沉淀经验, 记录bug, 补充知识库, capture lesson.
+allowed-tools:
+  - Read
+  - Write
+  - Edit
+  - Grep
+  - Glob
+---
+
+# Test Capture Skill
+
+将测试中发现的有价值内容快速沉淀到 Obsidian 测试知识库。
+
+## 工作流程
+1. 询问用户要沉淀的内容类型（经验/因子/缺陷模式/业务规则）
+2. 读取对应的模板文件 `07-Templates/`
+3. 基于用户的描述填充模板，生成完整的 .md 文件
+4. 保存到对应的知识库目录
+5. 更新 MOC 索引页，添加新条目链接
+6. 如果涉及多个知识库条目，建立 [[双向链接]]
+```
+
+#### 7.7.2 test-kb-health（知识库健康检查 Skill）
+
+```markdown
+---
+name: test-kb-health
+description: >
+  检查测试知识库健康状况：未审阅经验、孤立笔记、过期内容、MOC完整性。
+  Use when user says 知识库检查, KB health check.
+allowed-tools:
+  - Read
+  - Grep
+  - Glob
+  - Bash(grep:*,rg:*)
+---
+
+# Knowledge Base Health Check
+
+## 检查项
+1. 扫描 status=draft 的笔记 → 提醒审阅
+2. 检查 [[broken links]] → 提醒修复
+3. 列出 30 天未修改的 WIP 笔记 → 提醒归档
+4. 检查 MOC 索引是否覆盖所有目录中的笔记
+5. 统计各类知识数量，输出概览报告
+```
+
+### 7.8 方案B：MCP + Smart Connections（大仓库进阶）
+
+> 当你的 vault 超过 500 篇笔记，关键词搜索不够精准时，升级到此方案。
+
+#### Install Obsidian 插件
+
+在 Obsidian 社区插件市场搜索并安装：
+
+1. **Local REST API** — 为 Obsidian 提供 HTTP API（端口 27124）
+2. **Smart Connections** — 基于 embedding 的语义搜索
+3. **MCP Tools** — 将 Obsidian 作为 MCP Server 暴露
+
+#### 验证 API 可用
+
+```bash
+# 获取 vault 信息
+curl -X GET "http://127.0.0.1:27124/vault/" \
+  -H "Authorization: Bearer YOUR_API_KEY"
+
+# 语义搜索笔记
+curl -X GET "http://127.0.0.1:27124/smart-connections/search?query=退款并发安全" \
+  -H "Authorization: Bearer YOUR_API_KEY"
+```
+
+#### 注册为 MCP Server
+
+```bash
+claude mcp add obsidian-knowledge \
+  --command "npx" --args "-y" "mcp-obsidian" \
+  --env OBSIDIAN_API_KEY="你的Key" \
+  --env OBSIDIAN_API_URL="http://127.0.0.1:27124"
+```
+
+### 7.9 一键部署脚本
+
+```bash
+#!/bin/bash
+# Obsidian Testing Knowledge Base + AI Agent Skills 一键部署
+VAULT=~/Documents/Obsidian/Testing-Knowledge-Vault
+
+# 1. 创建知识库目录
+mkdir -p "$VAULT"/{00-Inbox,"01-Experiences"/{功能测试,性能测试,安全测试,兼容性测试},"02-Factors"/{输入因子,环境因子,状态因子,组合因子},03-Business-Rules,04-Bug-Patterns,05-Test-Methods,06-Cases,07-Templates,08-MOCs}
+
+# 2. 安装 obsidian-skills
+mkdir -p ~/.claude/skills
+git clone https://github.com/kepano/obsidian-skills.git /tmp/obsidian-skills 2>/dev/null
+cp -r /tmp/obsidian-skills/skills/* ~/.claude/skills/ 2>/dev/null
+rm -rf /tmp/obsidian-skills
+
+# 3. 创建 test-design skill 目录
+mkdir -p ~/.claude/skills/test-design
+# 请手动将 7.6.1 节的 SKILL.md 内容复制进去
+
+# 4. 创建模板
+cp ./test-experience-template.md "$VAULT/07-Templates/测试经验模板.md" 2>/dev/null
+cp ./factor-template.md "$VAULT/07-Templates/因子条目模板.md" 2>/dev/null
+
+# 5. Git 管理
+cd "$VAULT"
+git init 2>/dev/null
+echo ".obsidian/workspace.json
+.trash/
+.DS_Store
+Thumbs.db" > .gitignore
+git add -A && git commit -m "初始化测试知识库" 2>/dev/null
+
+echo "✅ 测试知识库已创建：$VAULT"
+echo "✅ obsidian-skills 已安装"
+echo "📝 下一步：将 test-design SKILL.md 复制到 ~/.claude/skills/test-design/"
+echo "📝 然后在 Obsidian 中打开 $VAULT"
+```
+
+### 7.10 关键注意事项
+
+1. **知识库预热**：首次使用每个目录至少手动填充 3-5 篇笔记，空知识库对 Agent 无帮助
+2. **粒度控制**：每篇经验笔记聚焦一个具体场景，不要写成「大而全」文档
+3. **持续积累**：每次发现新的测试盲区或踩坑，立即用 `/test-capture` 沉淀
+4. **元数据规范**：严格遵循模板的 Frontmatter 字段，这是 Agent 检索的关键
+5. **双向链接**：多用 `[[链接]]` 关联相关知识，Agent 会顺着链接发现更多内容
+6. **多语言关键词**：笔记中同时包含中文和英文关键词，提高搜索命中率
+7. **隐私安全**：知识库是纯本地 Markdown，Agent 本地运行，数据不上传云端
+8. **Git 备份**：知识库是你的核心资产，用 Git 管理并定期 push 到远程仓库
+
+### 7.11 扩展：其他领域的知识库架构
+
+| 领域 | Vault 示例 | 核心目录 | 配套 Skill |
+|------|-----------|---------|------------|
+| 代码审查 | Code-Review-Vault | 代码异味库/安全漏洞库/重构模式库 | `/code-review` |
+| 技术方案 | Tech-Design-Vault | 架构模式库/技术选型库/踩坑记录 | `/tech-design` |
+| 运维排障 | Ops-Vault | 告警模式库/故障案例库/恢复流程库 | `/ops-debug` |
+| 需求分析 | Req-Vault | 需求模式库/干系人库/验收标准库 | `/req-analysis` |
+| 项目管理 | PM-Vault | 风险库/干系人模式库/复盘模板 | `/pm-review` |
+
+**统一原则：** 每个 Vault 独立，Skill 可跨 Vault 搜索；保持统一的 Frontmatter 规范；全部用 Git 管理。

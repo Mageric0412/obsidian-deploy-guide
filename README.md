@@ -1643,15 +1643,7 @@ Agent 自动执行（基于 CLAUDE.md 中的指示）：
 
 > GitHub: https://github.com/kepano/obsidian-skills
 
-Obsidian CEO kepano 开源的 Agent Skills，教会 AI 如何正确读写 Obsidian 专属格式。
-
-**提供的三项核心能力：**
-
-| Skill | 功能 |
-|-------|------|
-| `obsidian-markdown` | 让 AI 使用 `[[wikilinks]]`、Callout、Frontmatter 等 Obsidian 特有语法 |
-| `obsidian-bases` | 让 AI 创建和编辑 `.base` 文件（Obsidian 数据库视图） |
-| `json-canvas` | 让 AI 理解和生成 `.canvas` 无限画布文件 |
+Obsidian CEO kepano 开源的 Agent Skills，教会 AI 正确读写 Obsidian 专属格式。**全套包含 4 个 Skill**，下面逐一说明它们在你的测试知识库场景中如何落地。
 
 **安装（推荐全局安装）：**
 
@@ -1664,7 +1656,534 @@ rm -rf /tmp/obsidian-skills
 
 或在 Claude Code 中：`/plugin install obsidian@obsidian-skills`
 
-验证：运行 `/skills` 应看到三个 obsidian-* skill。
+验证：运行 `/skills` 应看到 `obsidian-markdown`、`obsidian-bases`、`json-canvas`、`obsidian-cli` 四个 Skill。
+
+---
+
+#### 7.5.1 obsidian-markdown — 教 Agent 说 Obsidian 的"方言"
+
+**这个 Skill 解决什么问题？**
+
+普通的 AI 只会写标准 Markdown。让它在 Obsidian 里读/写笔记时，它会用 `[文本](链接)` 而不是 `[[wikilinks]]`，不会用 Callout、不会正确嵌入图片、不会写 Frontmatter。`obsidian-markdown` 教会 Agent 这些 Obsidian 专属语法。
+
+**在你的测试场景中怎么用？举例说明。**
+
+##### 例子1：Agent 帮你沉淀一条测试经验
+
+没有 `obsidian-markdown` 时，Agent 可能会写出这样的坏笔记：
+
+```markdown
+# 订单退款测试经验
+
+相关经验见: [并发竞态模式](并发竞态模式.md)
+图片: ![架构图](images/refund-flow.png)
+
+注意: 这里有个重要的问题
+退款金额在并发场景下会重复计算
+```
+
+装了 `obsidian-markdown` 后，Agent 会正确写出：
+
+```markdown
+---
+type: testing-experience
+module: "订单退款"
+test-type: "功能测试"
+test-method: "状态迁移"
+priority: "P0"
+tags:
+  - 退款
+  - 并发
+  - 状态机
+related-factors:
+  - "[[金额计算因子]]"
+  - "[[并发状态因子]]"
+related-bugs:
+  - "[[BUG-4201 并发退款重复到账]]"
+status: draft
+date: 2026-05-23
+---
+
+# 订单退款测试经验
+
+## 场景描述
+> 用户在订单已支付状态下发起退款，涉及金额计算、状态流转、第三方支付回调。
+
+## 前置条件
+- 订单处于「已支付」状态
+- 支付方式支持原路退回
+- 用户账户状态正常
+
+## 关键检查点
+- [ ] 退款金额 = 实付金额（不含已使用优惠券部分）
+- [ ] 部分退款时金额精度（分级别）
+- [ ] 退款状态机：申请 → 审核 → 退款中 → 已完成 / 已拒绝
+
+## 易遗漏边界
+- [ ] 并发发起两次退款请求 → 期望只退一次
+
+> [!bug] 踩坑：并发退款导致重复到账
+> 2025年3月，压测时发现用户快速点击两次「退款」按钮，
+> 两次请求同时进入 `refund()` 方法，均通过「未退款」状态检查，
+> 导致金额重复退回。根因是缺少分布式锁。
+>
+> **解决方案**：在退款入口加 Redis 分布式锁 `refund:lock:{orderId}`
+
+## 关联因子
+![[金额计算因子#边界值]]
+
+## 缺陷模式
+参见 [[并发竞态模式]]
+```
+
+关键差异：正确的 `[[wikilinks]]`、`> [!bug]` Callout、规范 Frontmatter、`![[embed]]` 语法。
+
+##### 例子2：Agent 批量更新知识库内的交叉引用
+
+```
+用户：帮我把所有 P0 的测试经验和对应的因子做双向链接
+
+Agent（借助 obsidian-markdown）：
+1. Grep 找到所有 priority: "P0" 的经验笔记
+2. 读取每篇的 related-factors 字段
+3. 在对应的因子笔记中，追加 related-experiences 反向链接
+4. 使用正确的 [[wikilinks]] 语法，Obsidian 能自动跟踪重命名
+```
+
+##### 例子3：Agent 用 Callout 结构化你的笔记
+
+Agent 在帮你整理已有笔记时，会自动识别内容类型并使用对应 Callout：
+
+| 内容类型 | 使用的 Callout | 示例 |
+|---------|---------------|------|
+| 重要提醒 | `> [!important]` | 关键检查点 |
+| 踩坑记录 | `> [!bug]` | 历史缺陷案例 |
+| 注意事项 | `> [!warning]` | 易遗漏边界 |
+| 测试技巧 | `> [!tip]` | 实用的测试方法 |
+| 参考信息 | `> [!info]` | 相关的业务规则 |
+| 待办事项 | `> [!todo]` | 待补充的测试场景 |
+
+---
+
+#### 7.5.2 obsidian-bases — 把你的笔记变成可筛选、可排序的数据视图
+
+**这个 Skill 解决什么问题？**
+
+你的测试知识库存了几百条经验、因子、Bug 模式后，靠文件树和搜索很难快速了解全貌。`obsidian-bases` 让 Agent 帮你创建 `.base` 文件——类似数据库视图，自动聚合所有符合条件的笔记，支持筛选、排序、分组、公式计算。
+
+**在你的测试场景中怎么用？举例说明。**
+
+##### 例子1：创建测试经验仪表盘
+
+让 Agent 帮你创建一个 `.base` 文件 `08-MOCs/测试经验仪表盘.base`：
+
+```
+用户：帮我创建一个 Bases 视图，展示所有测试经验，
+      按优先级分颜色显示，按模块分组，统计每个模块的经验数量
+
+Agent（借助 obsidian-bases）会生成：
+```
+
+```yaml
+filters:
+  and:
+    - 'type == "testing-experience"'   # 只显示测试经验类型的笔记
+    - 'file.ext == "md"'
+
+formulas:
+  priority_label: 'if(priority == "P0", "🔴 P0", if(priority == "P1", "🟡 P1", if(priority == "P2", "🟢 P2", "⚪ P3")))'
+  days_since_update: '(now() - file.mtime).days.round(0)'
+  is_stale: 'if(days_since_update > 90, true, false)'
+
+properties:
+  module:
+    displayName: "被测模块"
+  formula.priority_label:
+    displayName: "优先级"
+  formula.days_since_update:
+    displayName: "距上次更新(天)"
+  formula.is_stale:
+    displayName: "是否过期"
+
+views:
+  - type: table
+    name: "全部测试经验"
+    order:
+      - file.name
+      - module
+      - formula.priority_label
+      - test-type
+      - status
+      - formula.days_since_update
+    groupBy:
+      property: module
+    summaries:
+      test-type: Unique
+```
+
+Agent 生成后，你在 Obsidian 中打开 `测试经验仪表盘.base`，就能看到一个可交互的表格：
+- 按模块分组显示所有测试经验
+- P0 标记为红色、P1 黄色、P2 绿色
+- 超过 90 天未更新的自动标记为"过期"
+- 底部统计每个模块的经验数量
+
+##### 例子2：创建因子覆盖率矩阵
+
+```
+用户：帮我建一个因子覆盖率 Base，列出所有因子对应的测试方法，
+      标记哪些因子还没有关联经验
+
+Agent 生成：
+```
+
+```yaml
+filters:
+  and:
+    - 'type == "test-factor"'
+    - 'file.ext == "md"'
+
+formulas:
+  has_experience: 'if(related-experiences && length(related-experiences) > 0, "✅ 已关联", "❌ 未关联")'
+  experience_count: 'if(related-experiences, length(related-experiences), 0)'
+  method_list: 'test-methods.join(", ")'
+
+properties:
+  category:
+    displayName: "因子分类"
+  subcategory:
+    displayName: "子分类"
+  formula.method_list:
+    displayName: "适用测试方法"
+  formula.has_experience:
+    displayName: "关联状态"
+  risk-level:
+    displayName: "风险等级"
+
+views:
+  - type: table
+    name: "因子覆盖率矩阵"
+    order:
+      - file.name
+      - category
+      - subcategory
+      - formula.method_list
+      - formula.has_experience
+      - risk-level
+    groupBy:
+      property: category
+    filters:
+      and:
+        - 'formula.experience_count == 0'   # 只看未关联经验的因子
+
+  - type: table
+    name: "完整因子列表"
+    order:
+      - file.name
+      - category
+      - formula.has_experience
+```
+
+##### 例子3：创建 Bug 模式频率热力图
+
+```
+用户：帮我创建一个 Base，统计缺陷模式的出现频率，
+      按风险等级排序，标记最近发现的模式
+
+Agent 生成包含以下公式的 Base：
+- is_recent：判断该模式最近 30 天内是否被触发
+- severity_score：根据 severity 字段计算风险分数
+- related_cases：统计关联的测试用例数量
+```
+
+**核心价值：** Agent 不只是帮你"写"笔记，而是帮你"组织"和"可视化"笔记。几百条经验不再散落各处，通过 Base 视图一目了然。
+
+---
+
+#### 7.5.3 json-canvas — 让 Agent 画可视化的测试策略图
+
+**这个 Skill 解决什么问题？**
+
+Markdown 文档适合描述细节，但很难直观展示关系和流程。`json-canvas` 教会 Agent 创建和编辑 `.canvas` 文件——Obsidian 的无限画布，可以在上面放置笔记节点、图片、网页链接，用连线表达关系。
+
+**在你的测试场景中怎么用？举例说明。**
+
+##### 例子1：自动生成测试策略脑图
+
+```
+用户：帮我画一个「订单系统」的测试策略画布，包含所有模块和测试重点
+
+Agent（借助 json-canvas）执行：
+1. Grep 搜索订单相关的测试经验
+2. 提取每个模块的测试重点
+3. 生成 .canvas 文件，节点和连线清晰呈现
+```
+
+Agent 生成的 `订单系统测试策略.canvas` 结构：
+
+```json
+{
+  "nodes": [
+    {
+      "id": "order-root-00001",
+      "type": "text",
+      "x": 0, "y": 0,
+      "width": 350, "height": 80,
+      "text": "# 订单系统测试策略\n基于知识库经验生成",
+      "color": "6"
+    },
+    {
+      "id": "order-module-0001",
+      "type": "text",
+      "x": -300, "y": 150,
+      "width": 280, "height": 140,
+      "text": "## 下单模块\n\n### 重点\n- 库存扣减原子性 [[库存并发经验]]\n- 优惠券计算精度 [[金额计算因子]]\n\n### 风险\n- P0: 超卖问题",
+      "color": "1"
+    },
+    {
+      "id": "order-module-0002",
+      "type": "text",
+      "x": 100, "y": 150,
+      "width": 280, "height": 140,
+      "text": "## 支付模块\n\n### 重点\n- 支付回调幂等性 [[幂等处理经验]]\n- 超时关单机制\n\n### 风险\n- P0: 重复扣款",
+      "color": "1"
+    },
+    {
+      "id": "order-module-0003",
+      "type": "text",
+      "x": 500, "y": 150,
+      "width": 280, "height": 140,
+      "text": "## 退款模块\n\n### 重点\n- 退款状态机 [[退款经验]]\n- 并发锁机制 [[并发竞态模式]]\n\n### 风险\n- P0: 重复退款",
+      "color": "2"
+    },
+    {
+      "id": "factor-node-0001",
+      "type": "file",
+      "x": -150, "y": 400,
+      "width": 350, "height": 200,
+      "file": "02-Factors/输入因子/金额计算因子.md"
+    },
+    {
+      "id": "pattern-node-0001",
+      "type": "file",
+      "x": 300, "y": 400,
+      "width": 350, "height": 200,
+      "file": "04-Bug-Patterns/并发竞态模式.md"
+    }
+  ],
+  "edges": [
+    {
+      "id": "edge-001",
+      "fromNode": "order-root-00001",
+      "fromSide": "bottom",
+      "toNode": "order-module-0001",
+      "toSide": "top",
+      "label": "下单"
+    },
+    {
+      "id": "edge-002",
+      "fromNode": "order-root-00001",
+      "fromSide": "bottom",
+      "toNode": "order-module-0002",
+      "toSide": "top",
+      "label": "支付"
+    },
+    {
+      "id": "edge-003",
+      "fromNode": "order-root-00001",
+      "fromSide": "bottom",
+      "toNode": "order-module-0003",
+      "toSide": "top",
+      "label": "退款"
+    },
+    {
+      "id": "edge-004",
+      "fromNode": "order-module-0001",
+      "fromSide": "bottom",
+      "toNode": "factor-node-0001",
+      "toSide": "top",
+      "label": "引用因子"
+    },
+    {
+      "id": "edge-005",
+      "fromNode": "order-module-0003",
+      "fromSide": "bottom",
+      "toNode": "pattern-node-0001",
+      "toSide": "top",
+      "label": "关联缺陷模式"
+    }
+  ]
+}
+```
+
+在 Obsidian 中打开这个 `.canvas` 文件后，你会看到一张可视化的测试策略图：
+- 根节点「订单系统测试策略」居中
+- 三个模块节点按风险等级着色（红色=高风险）
+- 因子节点和缺陷模式节点通过连线关联到对应模块
+- 点击任意文件节点可以直接打开对应笔记
+
+##### 例子2：Bug 影响范围分析图
+
+```
+用户：帮我画一个 Bug 影响分析画布，分析「支付超时」这个 Bug 的影响范围
+
+Agent 执行：
+1. 搜索知识库中与「支付超时」相关的经验、因子、缺陷模式
+2. 创建画布，中心是 Bug 节点，向外辐射受影响模块
+3. 每个影响节点标注严重程度和关联的测试用例
+```
+
+最终生成的画布效果：
+```
+                  ┌─────────────────┐
+                  │  订单状态不一致   │
+                  │  严重度: P0      │
+                  └────────┬────────┘
+                           │
+  ┌─────────────────┐     │     ┌─────────────────┐
+  │  库存回滚失败    │ ←───┼───→ │  用户资金冻结    │
+  │  严重度: P1      │     │     │  严重度: P0      │
+  └─────────────────┘     │     └─────────────────┘
+                           │
+                  ┌────────┴────────┐
+                  │  支付超时 Bug    │
+                  │  (中心节点)      │
+                  └────────┬────────┘
+                           │
+                  ┌────────┴────────┐
+                  │  三方对账异常    │
+                  │  严重度: P2      │
+                  └─────────────────┘
+```
+
+##### 例子3：测试覆盖度热力图
+
+```
+用户：用 Canvas 画一个功能模块 x 测试类型的覆盖矩阵，
+      红色=未覆盖，黄色=部分覆盖，绿色=完整覆盖
+
+Agent 读取所有经验的 module 和 test-type 字段，
+生成覆盖矩阵画布（10个模块 x 5种测试类型 = 50个节点的矩阵）
+```
+
+---
+
+#### 7.5.4 obsidian-cli — 命令行直接操控 Obsidian
+
+**这个 Skill 解决什么问题？**
+
+前面的 Skill 都是在文件层面操作 `.md` / `.base` / `.canvas` 文件。`obsidian-cli` 更进一步——通过 Obsidian 的 CLI 接口，在 Obsidian 正在运行时直接操控它：搜索、创建笔记、读取内容、设置属性、操作任务等。
+
+> 前置条件：需要 Obsidian 正在运行，且已开启 CLI 功能（设置 → 核心插件 → CLI）
+
+**在你的测试场景中怎么用？举例说明。**
+
+##### 例子1：测试执行中快速追加发现的问题到知识库
+
+```
+场景：你正在做「红包发放」功能的测试，发现了一个边界问题。
+你不想切出 Obsidian，直接在 Claude Code 中：
+
+用户：记到今天的测试日记里：
+      「发现红包金额 0.01 元时，前端显示为 0 元，后端存储正常，
+        是前端 toFixed(2) 没有处理小数点后两位都为零的情况」
+
+Agent（借助 obsidian-cli）执行：
+  obsidian vault="Testing-Knowledge" daily:append \
+    content="- [ ] [BUG] 红包金额 0.01 元前端显示异常 \n  - 根因: toFixed(2) 返回 \\\"0.00\\\" \n  - 关联因子: [[金额计算因子]] \n  - 发现时间: $(date '+%Y-%m-%d %H:%M')"
+
+结果：直接追加到今天的日记文件中，无需切换窗口。
+```
+
+##### 例子2：Agent 搜索知识库时借用 Obsidian 的索引
+
+```
+用户：哪些经验笔记提到了「分布式事务」但没有标记 P0？
+
+Agent（借助 obsidian-cli）：
+  obsidian vault="Testing-Knowledge" search query="分布式事务"
+
+  → 返回 7 篇匹配笔记
+
+  obsidian property:get name="priority" file="分布式事务经验1"
+  → P1
+  obsidian property:get name="priority" file="分布式事务经验2"
+  → P2
+  obsidian property:get name="priority" file="分布式事务经验3"
+  → (none)
+
+Agent 输出：
+  「分布式事务」相关经验共 7 篇，其中：
+  - P0: 3 篇
+  - P1: 1 篇
+  - P2: 1 篇
+  - 未标优先级: 2 篇（建议补充：[[分布式事务经验3]]、[[消息队列事务经验]]）
+```
+
+##### 例子3：测试结束后批量归档
+
+```
+用户：帮我检查知识库中所有 status=draft 且超过 30 天未修改的经验，
+      如果是已经验证过的，帮我标记为 reviewed
+
+Agent（借助 obsidian-cli）：
+  1. obsidian vault="Testing-Knowledge" search query="status: draft"
+  2. 检查每篇的 mtime
+  3. 列出清单，让用户确认
+  4. obsidian property:set name="status" value="reviewed" file="XXX"
+```
+
+---
+
+#### 7.5.5 四合一实战：完整工作流演示
+
+以下展示一个完整场景，四个 Skill 如何协同工作：
+
+```
+用户：帮我做一个「用户注册」功能的完整测试设计，沉淀到知识库
+
+Agent 协同使用 4 个 Skill：
+
+Step 1（obsidian-cli）：搜索知识库
+  obsidian search query="注册|register" → 找到 3 篇经验、2 个因子
+
+Step 2（obsidian-cli）：读取搜索结果
+  obsidian read file="注册模块测试经验"
+  obsidian read file="字符串输入因子"
+
+Step 3（test-design Skill）：分析需求 + 知识库内容 → 生成测试用例
+
+Step 4（obsidian-markdown）：将测试经验保存为规范的 .md 文件
+  使用 [[wikilinks]] 链接因子和缺陷模式
+  使用 > [!important] 标注关键检查点
+  使用规范 Frontmatter
+
+Step 5（obsidian-bases）：更新经验仪表盘
+  新的经验自动出现在 Base 视图中
+
+Step 6（json-canvas）：更新测试策略画布
+  在「用户系统」画布中添加「注册」节点和连线
+
+最终产出：
+  ✅ 01-Experiences/功能测试/用户注册测试经验.md （遵循 obsidian-markdown 规范）
+  ✅ 08-MOCs/测试经验仪表盘.base 中自动可见新条目
+  ✅ 用户系统测试策略.canvas 中新增了注册模块节点
+  ✅ 与已有因子 [[字符串输入因子]] [[验证码因子]] 建立双向链接
+```
+
+---
+
+#### 7.5.6 Skill 组合使用速查
+
+| 场景 | 用到的 Skill | Agent 实际做了什么 |
+|------|-------------|-------------------|
+| 沉淀一条测试经验 | `obsidian-markdown` | 写规范的 .md，用 `[[wikilinks]]` + Callout + Frontmatter |
+| 创建经验数据看板 | `obsidian-bases` | 写 `.base` YAML，筛选+分组+公式+汇总 |
+| 画测试策略脑图 | `json-canvas` | 生成 `.canvas` JSON，节点+连线+颜色+布局 |
+| 快速搜索+追加日记 | `obsidian-cli` | `obsidian search` + `obsidian daily:append` |
+| 批量更新元数据 | `obsidian-cli` | `obsidian property:set` 批量修改 Frontmatter |
+| 补充双向链接 | `obsidian-markdown` | 在因子笔记中补充 `[[经验笔记]]` 反向链接 |
+| 生成测试覆盖矩阵 | `obsidian-bases` | Base 的交叉筛选 + 公式判定未覆盖项 |
+| Bug 影响分析图 | `json-canvas` | Bug 中心节点 → 辐射影响节点 → 连线标注 |
 
 ---
 
